@@ -214,40 +214,71 @@ function parseStatement(text){
 const isPay=d=>/pagamento|pagto|pag\.? fatura|pgto/i.test(d);
 function cardOf(s){s=String(s||'').replace(/[;,"]+/g,' ').replace(/\s+/g,' ').trim();return /final\s*:?\s*\d{4}/i.test(s)?s.slice(0,48):''}
 function cardKey(l){const m=String(l).match(/(\d{4})\D*$/);return m?'final '+m[1]:String(l).toUpperCase().trim()}
-function finalize(items){
+function finalize(items,month){
   if(!items.length) throw new Error('Não encontrei compras nesse arquivo.');
   const neg=items.filter(x=>!isPay(x.desc)&&x.amount<0).length, pos=items.filter(x=>!isPay(x.desc)&&x.amount>0).length;
   if(neg>pos) items=items.map(x=>({...x,amount:-x.amount}));
   const ok=items.filter(x=>x.amount>0&&!isPay(x.desc));
   const ignored=items.length-ok.length;
-  const latest=ok.reduce((a,x)=>x.date>a?x.date:a,'');
-  return {rows:ok,ignored,month:latest?latest.slice(0,7):'',cards:[...new Set(ok.map(x=>x.card).filter(Boolean))]};
+  const cnt={};ok.forEach(x=>{const k=x.date.slice(0,7);cnt[k]=(cnt[k]||0)+1});
+  const common=Object.keys(cnt).sort((a,b)=>cnt[b]-cnt[a])[0]||'';
+  return {rows:ok,ignored,month:month||common,cards:[...new Set(ok.map(x=>x.card).filter(Boolean))]};
 }
 const MES={jan:1,fev:2,mar:3,abr:4,mai:5,jun:6,jul:7,ago:8,set:9,out:10,nov:11,dez:12};
-function pdfDate(s){
+function pdfDate(s,ref){
   s=s.toLowerCase().replace(/\s+/g,' ').trim();let d,m,y=null,k;
   if((k=s.match(/^(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?$/))){d=+k[1];m=+k[2];if(k[3])y=+k[3]}
   else if((k=s.match(/^(\d{1,2}) (?:de )?([a-zç]{3})[a-zç]*\.?(?: (?:de )?(\d{4}))?$/))&&MES[k[2]]){d=+k[1];m=MES[k[2]];if(k[3])y=+k[3]}
   else return null;
   if(m<1||m>12||d<1||d>31) return null;
-  if(y===null){const n=new Date();y=n.getFullYear();if(m>n.getMonth()+2)y--}else if(y<100)y+=2000;
+  if(y===null){
+    if(ref){y=ref.y;if(m>ref.m||(m===ref.m&&d>ref.d))y--}
+    else{const n=new Date();y=n.getFullYear();if(m>n.getMonth()+2)y--}
+  } else if(y<100)y+=2000;
   return y+'-'+pad(m)+'-'+pad(d);
 }
-const PDF_RE=/(\d{1,2}\/\d{1,2}(?:\/\d{2,4})?|\d{1,2}\s+(?:de\s+)?(?:jan|fev|mar|abr|mai|jun|jul|ago|set|out|nov|dez)[a-zç]*\.?(?:\s+(?:de\s+)?\d{4})?)\s+(.+?)\s+(?:(\+)\s*|(-)(?=R\$|\d)|-\s+)?(?:R\$\s*)?(-)?(\d{1,3}(?:\.\d{3})*,\d{2})(\s*C(?![A-Za-z]))?(?=\s|$)/gi;
+const PDF_RE=/(\d{1,2}\/\d{1,2}(?:\/\d{2,4})?|\d{1,2}\s+(?:de\s+)?(?:jan|fev|mar|abr|mai|jun|jul|ago|set|out|nov|dez)[a-zç]*\.?(?:\s+(?:de\s+)?\d{4})?)\s+(.+?)\s+(?:(\+)\s*|(-)(?=R\$)|(-)\s*(?=\d)|-\s+)?(?:R\$\s*)?(-)?(\d{1,3}(?:\.\d{3})*,\d{2})(\s*C(?![A-Za-z]))?(?=\s|$)/gi;
 const SKIP=/limite|vencimento|fechamento|total|saldo|melhor dia|m[ií]nimo/i;
+const STOP=/pr[oó]ximas faturas|total dos lan[cç]amentos atuais/i;
+function pdfMeta(lines){
+  const all=lines.join(' \n ');let ref=null,month='';
+  const v=all.match(/vencimento[^\d\n]{0,12}(\d{2})\/(\d{2})\/(\d{4})/i)||all.match(/emiss[aã]o[^\d\n]{0,12}(\d{2})\/(\d{2})\/(\d{4})/i);
+  if(v){ref={d:+v[1],m:+v[2],y:+v[3]};let mm=ref.m-1,yy=ref.y;if(mm<1){mm=12;yy--}month=yy+'-'+pad(mm)}
+  return {ref,month};
+}
 function parsePdfLines(lines){
-  const items=[];let card='';
-  for(const line of lines){PDF_RE.lastIndex=0;let m,hit=false;
+  const {ref,month}=pdfMeta(lines);
+  const items=[],seen={};let card='',last='';
+  for(const line of lines){
+    if(STOP.test(line)) break;
+    PDF_RE.lastIndex=0;let m,hit=false;
     while((m=PDF_RE.exec(line))){
-      const date=pdfDate(m[1]);const desc=m[2].replace(/R\$\s*$/,'').replace(/\s+/g,' ').trim();
+      const date=pdfDate(m[1],ref);const desc=m[2].replace(/R\$\s*$/,'').replace(/\s+/g,' ').trim();
       if(!date||!/[A-Za-zÀ-ú]{2,}/.test(desc)||SKIP.test(desc))continue;
-      let amount=parseAmount(m[6]);if(m[3]||m[4]||m[5]||m[7])amount=-amount;
-      items.push({date,desc,amount,card});hit=true;
+      let amount=parseAmount(m[7]);if(m[3]||m[4]||m[5]||m[6]||m[8])amount=-amount;
+      items.push({date,desc,amount,card});hit=true;last=date;
     }
-    if(!hit){const k=cardOf(line);if(k)card=k}
+    if(!hit){
+      const k=cardOf(line);if(k){card=k;const dg=k.match(/(\d{4})\D*$/);if(dg)seen[dg[1]]=k}
+      const tt=line.match(/^titular\s+(\d{4})\b/i);if(tt&&items.length)items[items.length-1].card=seen[tt[1]]||('Titular final '+tt[1]);
+      const iof=line.match(/repasse de iof[^\d]*(\d{1,3}(?:\.\d{3})*,\d{2})/i);
+      if(iof&&last) items.push({date:last,desc:'IOF compras internacionais',amount:parseAmount(iof[1]),card});
+    }
   }
   if(!items.length) throw new Error('Não encontrei compras nesse PDF. Confira se é a fatura do cartão.');
-  return finalize(items);
+  return finalize(items,month);
+}
+function layoutLines(its,W){
+  const rd=its.filter(i=>i.x>W*0.4&&/^\s*\d{1,2}\/\d{1,2}(\s|$)/.test(i.s));
+  let groups=[its];
+  if(rd.length>=3){const c={};rd.forEach(i=>{const k=Math.round(i.x/4);c[k]=(c[k]||0)+1});const split=Math.min(...rd.filter(i=>c[Math.round(i.x/4)]===Math.max(...Object.values(c))).map(i=>i.x))-3;groups=[its.filter(i=>i.x<split),its.filter(i=>i.x>=split)]}
+  const out=[];
+  for(const g of groups){
+    const rows=[];
+    for(const it of g){let r=rows.find(r=>Math.abs(r.y-it.y)<3);if(!r){r={y:it.y,items:[]};rows.push(r)}r.items.push(it)}
+    rows.sort((a,b)=>b.y-a.y).forEach(r=>out.push(r.items.sort((a,b)=>a.x-b.x).map(i=>i.s).join(' ').replace(/\s+/g,' ').trim()));
+  }
+  return out;
 }
 async function pdfLines(buf,password){
   const SRC=['https://cdn.jsdelivr.net/npm/pdfjs-dist@6.5.438/legacy/build/','https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/legacy/build/'];
@@ -261,10 +292,9 @@ async function pdfLines(buf,password){
   if(!doc) throw new Error('Não consegui abrir esse PDF ('+((lastErr&&lastErr.message)||'erro')+'). Tente baixar a fatura de novo, ou pelo internet banking.');
   const lines=[];
   for(let p=1;p<=doc.numPages;p++){
-    const tc=await (await doc.getPage(p)).getTextContent();const rows=[];
-    for(const it of tc.items){if(!it.str||!it.str.trim())continue;const x=it.transform[4],y=it.transform[5];
-      let r=rows.find(r=>Math.abs(r.y-y)<3);if(!r){r={y,items:[]};rows.push(r)}r.items.push({x,s:it.str})}
-    rows.sort((a,b)=>b.y-a.y).forEach(r=>lines.push(r.items.sort((a,b)=>a.x-b.x).map(i=>i.s).join(' ').replace(/\s+/g,' ').trim()));
+    const page=await doc.getPage(p);const W=page.getViewport({scale:1}).width;const tc=await page.getTextContent();
+    const its=tc.items.filter(it=>it.str&&it.str.trim()).map(it=>({x:it.transform[4],y:it.transform[5],s:it.str}));
+    layoutLines(its,W).forEach(l=>lines.push(l));
   }
   return lines;
 }
@@ -277,7 +307,7 @@ let S=load()||defaults();
 S.people.forEach(p=>{if(p.name==='Gisele')p.name='Giselle'});
 S.cardMap=S.cardMap||{};
 function save(){try{localStorage.setItem(KEY,JSON.stringify(S))}catch(e){toast('Não consegui salvar neste navegador. Faça um backup.')}}
-let view='inicio',filter='sem',sheet=null,importDraft=null,delArm=false;
+let view='inicio',filter='conf',sheet=null,importDraft=null,delArm=false;
 
 const person=id=>S.people.find(p=>p.id===id)||{id,name:'?',color:'#888'};
 const txs=k=>(S.months[k]||{txs:[]}).txs;
@@ -327,12 +357,12 @@ function viewInicio(){
     <div class="card empty">Nenhuma fatura ainda.<br>Importe o CSV da fatura do Itaú ou do Inter para começar.</div>
     <button class="btn dark" data-a="goImport">${I.up} Importar fatura (CSV)</button>
     <button class="link" data-a="restore">Restaurar um backup</button></main>`;
-  const k=S.current,T=totals(k),list=txs(k),done=list.filter(assigned).length,pct=list.length?Math.round(done/list.length*100):0;
+  const k=S.current,T=totals(k),list=txs(k),done=list.filter(t=>assigned(t)&&!t.check).length,pct=list.length?Math.round(done/list.length*100):0;
   const rows=S.people.map(p=>`<div class="row"><span class="av" style="background:${p.color}">${esc(ini(p.name))}</span><span class="grow name">${esc(p.name)}</span><span class="val">${brl((T.by[p.id]||{total:0}).total)}</span></div>`).join('');
   return `<main class="screen">
     <div><span class="sub">Cartão compartilhado · fatura de</span>${mnav(true)}</div>
     <div class="hero"><span style="font-size:14px;font-weight:600">Total da fatura</span><span class="big">${brl(T.total)}</span>
-      <div class="bar"><i style="width:${pct}%"></i></div><span style="font-size:13px;font-weight:600">${done} de ${list.length} compras já têm dono${list.filter(t=>assigned(t)&&t.check).length?' · '+list.filter(t=>assigned(t)&&t.check).length+' a conferir':''}</span></div>
+      <div class="bar"><i style="width:${pct}%"></i></div><span style="font-size:13px;font-weight:600">${done} de ${list.length} compras conferidas</span></div>
     <div class="sect"><h2>Por pessoa</h2><div class="card list">${rows}
       <button class="row" data-a="goSem"><span class="av q">?</span><span class="grow name" style="color:var(--mut)">Sem dono (${T.unCount})</span><span class="val" style="color:var(--mut)">${brl(T.un)}</span></button></div></div>
     <button class="btn dark" data-a="goImport">${I.up} Importar fatura (CSV)</button>
@@ -345,7 +375,7 @@ function txCard(t){
   let bottom;
   if(assigned(t)){
     const ids=Object.keys(t.split),multi=ids.length>1;
-    bottom=ids.map(id=>{const p=person(id);return `<span class="pill" style="background:${p.color}1A;color:${p.color}"><span class="av sm" style="background:${p.color}">${esc(ini(p.name))}</span>${esc(p.name)}${multi?' · '+num2(t.split[id]):''}</span>`}).join('')+(t.type?`<span class="tag">${esc(t.type)}</span>`:'')+(t.check?`<button class="tag" data-a="confirm" data-id="${t.id}" style="border:0;background:#FFF3E3;color:#7A4208;font-weight:800;min-height:44px;gap:6px">${I.check} A conferir · Confirmar</button>`:'');
+    bottom=ids.map(id=>{const p=person(id);return `<span class="pill" style="background:${p.color}1A;color:${p.color}"><span class="av sm" style="background:${p.color}">${esc(ini(p.name))}</span>${esc(p.name)}${multi?' · '+num2(t.split[id]):''}</span>`}).join('')+(t.type?`<span class="tag">${esc(t.type)}</span>`:'')+(t.check?`<button class="tag" data-a="confirm" data-id="${t.id}" style="border:0;background:#FFF3E3;color:#7A4208;font-weight:800;min-height:44px;gap:6px">${I.check} Confirmar</button>`:'');
   } else {
     bottom=S.people.map(p=>`<button class="chip" data-a="quick" data-id="${t.id}" data-p="${p.id}" aria-label="Marcar para ${esc(p.name)}" style="border-color:${p.color}55;background:${p.color}14;color:${p.color}">${esc(ini(p.name))}</button>`).join('')+`<button class="chip add" data-a="open" data-id="${t.id}" aria-label="Mais opções">${I.plus}</button>`;
   }
@@ -353,13 +383,13 @@ function txCard(t){
 }
 function viewCompras(){
   if(!S.current) return `<main class="screen"><h1>Compras</h1><div class="card empty">Importe uma fatura primeiro.</div><button class="btn dark" data-a="goImport">${I.up} Importar fatura (CSV)</button></main>`;
-  const list=sorted(),sem=list.filter(t=>!assigned(t)),conf=list.filter(t=>assigned(t)&&t.check),show=filter==='sem'?sem:filter==='conf'?conf:list;
+  const list=sorted(),conf=list.filter(t=>!assigned(t)||t.check),okl=list.filter(t=>assigned(t)&&!t.check),show=filter==='ok'?okl:conf;
   return `<main class="screen">
     <div><h1>Compras</h1>${mnav(false)}</div>
-    <div class="seg"><button class="${filter==='sem'?'on':''}" data-a="filt" data-f="sem">Sem dono · ${sem.length}</button><button class="${filter==='conf'?'on':''}" data-a="filt" data-f="conf">Conferir · ${conf.length}</button><button class="${filter==='todas'?'on':''}" data-a="filt" data-f="todas">Todas · ${list.length}</button></div>
-    ${filter==='conf'&&conf.length?'<button class="btn light" data-a="confirmAll">Confirmar todas ('+conf.length+')</button>':''}
-    ${show.length?'<span class="help">Toque numa pessoa para marcar rapidinho, ou na compra para escolher o tipo e dividir.</span>':''}
-    <div class="sect">${show.length?show.map(txCard).join(''):`<div class="card empty">Tudo marcado nesta fatura.<br><button class="link" data-a="tab" data-v="resumo">Ver o resumo</button></div>`}</div>
+    <div class="seg"><button class="${filter!=='ok'?'on':''}" data-a="filt" data-f="conf">A conferir · ${conf.length}</button><button class="${filter==='ok'?'on':''}" data-a="filt" data-f="ok">Conferidos · ${okl.length}</button></div>
+    ${filter!=='ok'&&conf.some(assigned)?'<button class="btn light" data-a="confirmAll">Confirmar todas que já têm dono ('+conf.filter(assigned).length+')</button>':''}
+    ${show.length?'<span class="help">Toque em Confirmar se estiver certo, ou na compra para trocar a pessoa, escolher o tipo ou dividir.</span>':''}
+    <div class="sect">${show.length?show.map(txCard).join(''):`<div class="card empty">${filter==='ok'?'Nenhuma compra conferida ainda.':'Tudo conferido nesta fatura.'}<br><button class="link" data-a="tab" data-v="resumo">Ver o resumo</button></div>`}</div>
   </main>`;
 }
 function viewResumo(){
@@ -522,7 +552,7 @@ function doImport(){
     if(pid&&S.people.some(p=>p.id===pid)){t.split={[pid]:t.amount};t.check=true;const ru=S.rules[norm(t.desc)];if(ru&&ru.type)t.type=ru.type;auto++}
     else if(applyRule(t)) auto++;
     m.txs.push(t); added++;});
-  S.current=d.month; importDraft=null; view='compras'; filter='sem'; save(); render();
+  S.current=d.month; importDraft=null; view='compras'; filter='conf'; save(); render();
   toast(added?`${added} compras importadas${auto?` · ${auto} marcadas automaticamente`:''}`:'Nenhuma compra nova nesse arquivo');
 }
 function backup(){
@@ -540,7 +570,7 @@ async function share(){
 const A={
   tab:el=>{view=el.dataset.v;delArm=false;render();scrollTo(0,0)},
   goImport:()=>{view='import';importDraft=null;render();scrollTo(0,0)},
-  goSem:()=>{view='compras';filter='sem';render();scrollTo(0,0)},
+  goSem:()=>{view='compras';filter='conf';render();scrollTo(0,0)},
   filt:el=>{filter=el.dataset.f;render()},
   mprev:()=>{const ks=keys(),i=ks.indexOf(S.current);if(i>0){S.current=ks[i-1];save();render()}},
   mnext:()=>{const ks=keys(),i=ks.indexOf(S.current);if(i<ks.length-1){S.current=ks[i+1];save();render()}},
