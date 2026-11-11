@@ -208,14 +208,56 @@ function parseStatement(text){
     if(!date||amount===null||!desc) continue;
     items.push({date,desc,amount});
   }
+  return finalize(items);
+}
+const isPay=d=>/pagamento|pagto|pag\.? fatura|pgto/i.test(d);
+function finalize(items){
   if(!items.length) throw new Error('Não encontrei compras nesse arquivo.');
-  const isPay=d=>/pagamento|pagto|pag\.? fatura|pgto/i.test(d);
   const neg=items.filter(x=>!isPay(x.desc)&&x.amount<0).length, pos=items.filter(x=>!isPay(x.desc)&&x.amount>0).length;
   if(neg>pos) items=items.map(x=>({...x,amount:-x.amount}));
   const ok=items.filter(x=>x.amount>0&&!isPay(x.desc));
   const ignored=items.length-ok.length;
   const latest=ok.reduce((a,x)=>x.date>a?x.date:a,'');
   return {rows:ok,ignored,month:latest?latest.slice(0,7):''};
+}
+const MES={jan:1,fev:2,mar:3,abr:4,mai:5,jun:6,jul:7,ago:8,set:9,out:10,nov:11,dez:12};
+function pdfDate(s){
+  s=s.toLowerCase().replace(/\s+/g,' ').trim();let d,m,y=null,k;
+  if((k=s.match(/^(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?$/))){d=+k[1];m=+k[2];if(k[3])y=+k[3]}
+  else if((k=s.match(/^(\d{1,2}) (?:de )?([a-zç]{3})[a-zç]*\.?(?: (?:de )?(\d{4}))?$/))&&MES[k[2]]){d=+k[1];m=MES[k[2]];if(k[3])y=+k[3]}
+  else return null;
+  if(m<1||m>12||d<1||d>31) return null;
+  if(y===null){const n=new Date();y=n.getFullYear();if(m>n.getMonth()+2)y--}else if(y<100)y+=2000;
+  return y+'-'+pad(m)+'-'+pad(d);
+}
+const PDF_RE=/(\d{1,2}\/\d{1,2}(?:\/\d{2,4})?|\d{1,2}\s+(?:de\s+)?(?:jan|fev|mar|abr|mai|jun|jul|ago|set|out|nov|dez)[a-zç]*\.?(?:\s+(?:de\s+)?\d{4})?)\s+(.+?)\s+(?:(\+)\s*|(-)(?=R\$|\d)|-\s+)?(?:R\$\s*)?(-)?(\d{1,3}(?:\.\d{3})*,\d{2})(\s*C(?![A-Za-z]))?(?=\s|$)/gi;
+const SKIP=/limite|vencimento|fechamento|total|saldo|melhor dia|m[ií]nimo/i;
+function parsePdfLines(lines){
+  const items=[];
+  for(const line of lines){PDF_RE.lastIndex=0;let m;
+    while((m=PDF_RE.exec(line))){
+      const date=pdfDate(m[1]);const desc=m[2].replace(/R\$\s*$/,'').replace(/\s+/g,' ').trim();
+      if(!date||!/[A-Za-zÀ-ú]{2,}/.test(desc)||SKIP.test(desc))continue;
+      let amount=parseAmount(m[6]);if(m[3]||m[4]||m[5]||m[7])amount=-amount;
+      items.push({date,desc,amount});
+    }
+  }
+  if(!items.length) throw new Error('Não encontrei compras nesse PDF. Confira se é a fatura do cartão.');
+  return finalize(items);
+}
+async function pdfLines(buf,password){
+  let pdfjs;
+  try{pdfjs=await import('https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.min.mjs');pdfjs.GlobalWorkerOptions.workerSrc='https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.worker.min.mjs'}
+  catch(e){throw new Error('Não consegui carregar o leitor de PDF. Confira a internet e tente de novo.')}
+  const doc=await pdfjs.getDocument({data:new Uint8Array(buf.slice(0)),password}).promise;
+  const lines=[];
+  for(let p=1;p<=doc.numPages;p++){
+    const tc=await (await doc.getPage(p)).getTextContent();const rows=[];
+    for(const it of tc.items){if(!it.str||!it.str.trim())continue;const x=it.transform[4],y=it.transform[5];
+      let r=rows.find(r=>Math.abs(r.y-y)<3);if(!r){r={y,items:[]};rows.push(r)}r.items.push({x,s:it.str})}
+    rows.sort((a,b)=>b.y-a.y).forEach(r=>lines.push(r.items.sort((a,b)=>a.x-b.x).map(i=>i.s).join(' ').replace(/\s+/g,' ').trim()));
+  }
+  return lines;
 }
 // PARSER-END
 
@@ -330,8 +372,10 @@ function viewResumo(){
 function viewImport(){
   const d=importDraft;
   let body;
-  if(!d) body=`<label class="file">${I.up}<span>Escolher o CSV da fatura</span><span class="help">O arquivo é lido só aqui no seu aparelho. Nada é enviado para a internet.</span><input type="file" accept=".csv,text/csv,text/plain,text/comma-separated-values" data-c="file"></label>
-    <span class="help">${S.bank==='itau'?'Itaú: no app ou no internet banking, abra a fatura do cartão e baixe/exporte em CSV.':'Inter: no app, abra a fatura do cartão e exporte em CSV.'} Se vier em Excel (.xls), abra e salve como CSV.</span>`;
+  if(!d) body=`<label class="file">${I.up}<span>Escolher a fatura (CSV ou PDF)</span><span class="help">O arquivo é lido só aqui no seu aparelho. Nada é enviado para a internet.</span><input type="file" accept=".csv,.pdf,text/csv,text/plain,text/comma-separated-values,application/pdf" data-c="file"></label>
+    <span class="help">${({itau:'Itaú: baixe a fatura do cartão em CSV (se vier em Excel, salve como CSV).',inter:'Inter: no app, vá em Cartões → Fatura, escolha o mês e baixe o PDF. Também aceita o CSV do extrato da conta.',caixa:'Caixa: baixe a fatura do cartão em PDF (pelo app ou pelo e-mail da fatura).'})[S.bank]||''}</span>`;
+  else if(d.loading) body='<div class="card empty">Lendo o arquivo…</div>';
+  else if(d.needPass) body=`<div class="sect"><span style="font-weight:800;font-size:15px">Esse PDF tem senha</span><span class="help">${d.wrong?'Senha incorreta, tente de novo. ':''}Digite a senha do PDF. Ela é usada só para abrir o arquivo aqui e não fica salva.</span><div class="inline"><input class="inp" id="pdfPass" type="password" autocomplete="off" aria-label="Senha do PDF"><button class="btn dark" style="min-height:46px" data-a="unlock">Abrir</button></div></div><button class="link" data-a="resetImport">Escolher outro arquivo</button>`;
   else if(d.error) body=`<div class="warn">${I.alert}<span>${esc(d.error)}</span></div><button class="btn soft" data-a="resetImport">Escolher outro arquivo</button>`;
   else {
     const exists=S.months[d.month]&&txs(d.month).length;
@@ -345,7 +389,7 @@ function viewImport(){
   }
   return `<main class="screen">
     <div style="display:flex;align-items:center;gap:6px;margin-left:-10px"><button class="icon" data-a="tab" data-v="inicio" aria-label="Voltar">${I.left}</button><h1 style="font-size:24px">Importar fatura</h1></div>
-    <div class="sect"><span style="font-weight:800;font-size:15px">Banco do cartão</span><div class="seg"><button class="${S.bank==='itau'?'on':''}" data-a="bank" data-b="itau">Itaú</button><button class="${S.bank==='inter'?'on':''}" data-a="bank" data-b="inter">Inter</button></div></div>
+    <div class="sect"><span style="font-weight:800;font-size:15px">Banco do cartão</span><div class="seg"><button class="${S.bank==='itau'?'on':''}" data-a="bank" data-b="itau">Itaú</button><button class="${S.bank==='inter'?'on':''}" data-a="bank" data-b="inter">Inter</button><button class="${S.bank==='caixa'?'on':''}" data-a="bank" data-b="caixa">Caixa</button></div></div>
     ${body}</main>`;
 }
 function render(){
@@ -439,12 +483,19 @@ function addType(){
   if(!S.types.some(x=>x.toLowerCase()===name.toLowerCase())) S.types.push(name);
   sheet.type=S.types.find(x=>x.toLowerCase()===name.toLowerCase()); sheet.addingT=false; save(); renderSheet();
 }
-function readFile(file){
+async function readFile(file,password){
   if(!file) return;
-  const fr=new FileReader();
-  fr.onload=()=>{try{const r=parseStatement(decodeBytes(fr.result));importDraft={...r,fileName:file.name}}catch(e){importDraft={error:e.message||'Não consegui ler esse arquivo.'}}render()};
-  fr.onerror=()=>{importDraft={error:'Não consegui abrir o arquivo.'};render()};
-  fr.readAsArrayBuffer(file);
+  importDraft={loading:true};render();
+  try{
+    const buf=await file.arrayBuffer();
+    const isPdf=/\.pdf$/i.test(file.name)||file.type==='application/pdf'||new TextDecoder().decode(new Uint8Array(buf.slice(0,5)))==='%PDF-';
+    const r=isPdf?parsePdfLines(await pdfLines(buf,password)):parseStatement(decodeBytes(buf));
+    importDraft={...r,fileName:file.name};
+  }catch(e){
+    if(e&&e.name==='PasswordException') importDraft={needPass:true,file,wrong:!!password};
+    else importDraft={error:(e&&e.message)||'Não consegui ler esse arquivo.'};
+  }
+  render();
 }
 function doImport(){
   const d=importDraft; if(!d||!d.rows||!/^\d{4}-\d{2}$/.test(d.month)){toast('Escolha o mês da fatura');return}
@@ -501,6 +552,7 @@ const A={
     t.split=split;t.type=sheet.type;finishSave(t)},
   bank:el=>{S.bank=el.dataset.b;save();render()},
   resetImport:()=>{importDraft=null;render()},
+  unlock:()=>{const el=$('#pdfPass'),p=el?el.value:'';if(!p||!importDraft||!importDraft.file)return;readFile(importDraft.file,p)},
   doImport,backup,share,
   restore:()=>$('#restoreInput').click(),
   delMonth:()=>{if(!delArm){delArm=true;render();setTimeout(()=>{if(delArm){delArm=false;render()}},4000);return}
@@ -524,6 +576,7 @@ document.addEventListener('input',e=>{
 document.addEventListener('keydown',e=>{
   if(e.key==='Enter'&&e.target.id==='newP'){e.preventDefault();addPerson()}
   if(e.key==='Enter'&&e.target.id==='newT'){e.preventDefault();addType()}
+  if(e.key==='Enter'&&e.target.id==='pdfPass'){e.preventDefault();A.unlock()}
 });
 $('#restoreInput').addEventListener('change',e=>{
   const f=e.target.files[0]; if(!f) return; const fr=new FileReader();
