@@ -246,10 +246,15 @@ function parsePdfLines(lines){
   return finalize(items);
 }
 async function pdfLines(buf,password){
-  let pdfjs;
-  try{pdfjs=await import('https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.min.mjs');pdfjs.GlobalWorkerOptions.workerSrc='https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.worker.min.mjs'}
-  catch(e){throw new Error('Não consegui carregar o leitor de PDF. Confira a internet e tente de novo.')}
-  const doc=await pdfjs.getDocument({data:new Uint8Array(buf.slice(0)),password}).promise;
+  const SRC=['https://cdn.jsdelivr.net/npm/pdfjs-dist@6.5.438/legacy/build/','https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/legacy/build/'];
+  let doc=null,lastErr=null;
+  for(const base of SRC){
+    let pdfjs;
+    try{pdfjs=await import(base+'pdf.min.mjs');pdfjs.GlobalWorkerOptions.workerSrc=base+'pdf.worker.min.mjs'}catch(e){lastErr=new Error('não consegui carregar o leitor de PDF, confira a internet');continue}
+    try{doc=await pdfjs.getDocument({data:new Uint8Array(buf.slice(0)),password,stopAtErrors:false}).promise;break}
+    catch(e){if(e&&e.name==='PasswordException')throw e;lastErr=e}
+  }
+  if(!doc) throw new Error('Não consegui abrir esse PDF ('+((lastErr&&lastErr.message)||'erro')+'). Tente baixar a fatura de novo, ou pelo internet banking.');
   const lines=[];
   for(let p=1;p<=doc.numPages;p++){
     const tc=await (await doc.getPage(p)).getTextContent();const rows=[];
