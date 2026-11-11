@@ -180,13 +180,17 @@ const normH=c=>String(c).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'').t
 function parseStatement(text){
   const rows=splitCSV(text);
   if(!rows.length) throw new Error('O arquivo está vazio.');
-  let di=-1,ti=-1,vi=-1,start=0;
+  let di=-1,ti=-1,vi=-1,hc=-1,start=0;
   const hi=rows.findIndex(r=>r.some(c=>/^data/.test(normH(c)))&&r.some(c=>/valor/.test(normH(c))));
   if(hi>=0){
     const h=rows[hi].map(normH);
     di=h.findIndex(c=>/^data/.test(c));
     vi=h.findIndex(c=>/^valor/.test(c)); if(vi<0) vi=h.findIndex(c=>/valor/.test(c));
-    ti=h.findIndex(c=>/lancamento|descri|historico|estabelecimento|titulo|lojista/.test(c));
+    const pick=re=>h.findIndex((c,i)=>i!==di&&i!==vi&&re.test(c));
+    ti=pick(/descri|estabelecimento|lojista|titulo/);
+    hc=pick(/historico/);
+    if(ti<0){ti=hc;hc=-1}
+    if(ti<0) ti=pick(/lancamento/);
     start=hi+1;
   }
   if(di<0||vi<0||ti<0){
@@ -200,7 +204,7 @@ function parseStatement(text){
   }
   let items=[];
   for(let i=start;i<rows.length;i++){
-    const r=rows[i]; const date=parseDate(r[di]); const amount=parseAmount(r[vi]); const desc=(r[ti]||'').replace(/\s+/g,' ').trim();
+    const r=rows[i]; const date=parseDate(r[di]); const amount=parseAmount(r[vi]); const desc=[r[ti],hc>=0?r[hc]:''].map(x=>(x||'').replace(/\s+/g,' ').trim()).filter(x=>x&&!parseDate(x)).join(' · ');
     if(!date||amount===null||!desc) continue;
     items.push({date,desc,amount});
   }
