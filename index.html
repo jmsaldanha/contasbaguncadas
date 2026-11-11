@@ -180,7 +180,7 @@ const normH=c=>String(c).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'').t
 function parseStatement(text){
   const rows=splitCSV(text);
   if(!rows.length) throw new Error('O arquivo está vazio.');
-  let di=-1,ti=-1,vi=-1,hc=-1,start=0;
+  let di=-1,ti=-1,vi=-1,hc=-1,ci=-1,start=0;
   const hi=rows.findIndex(r=>r.some(c=>/^data/.test(normH(c)))&&r.some(c=>/valor/.test(normH(c))));
   if(hi>=0){
     const h=rows[hi].map(normH);
@@ -191,6 +191,7 @@ function parseStatement(text){
     hc=pick(/historico/);
     if(ti<0){ti=hc;hc=-1}
     if(ti<0) ti=pick(/lancamento/);
+    ci=h.findIndex((c,i)=>i!==di&&i!==vi&&i!==ti&&i!==hc&&/cartao|portador|titular|usuario/.test(c));
     start=hi+1;
   }
   if(di<0||vi<0||ti<0){
@@ -202,15 +203,17 @@ function parseStatement(text){
     ti=best; start=0;
     if(vi<0||ti<0) throw new Error('Não consegui identificar as colunas de descrição e valor.');
   }
-  let items=[];
+  let items=[],card='';
   for(let i=start;i<rows.length;i++){
     const r=rows[i]; const date=parseDate(r[di]); const amount=parseAmount(r[vi]); const desc=[r[ti],hc>=0?r[hc]:''].map(x=>(x||'').replace(/\s+/g,' ').trim()).filter(x=>x&&!parseDate(x)).join(' · ');
-    if(!date||amount===null||!desc) continue;
-    items.push({date,desc,amount});
+    if(!date||amount===null||!desc){const k=cardOf(r.join(' '));if(k)card=k;continue}
+    items.push({date,desc,amount,card:ci>=0&&r[ci]?(cardOf(r[ci])||r[ci].trim()):card});
   }
   return finalize(items);
 }
 const isPay=d=>/pagamento|pagto|pag\.? fatura|pgto/i.test(d);
+function cardOf(s){s=String(s||'').replace(/[;,"]+/g,' ').replace(/\s+/g,' ').trim();return /final\s*:?\s*\d{4}/i.test(s)?s.slice(0,48):''}
+function cardKey(l){const m=String(l).match(/(\d{4})\D*$/);return m?'final '+m[1]:String(l).toUpperCase().trim()}
 function finalize(items){
   if(!items.length) throw new Error('Não encontrei compras nesse arquivo.');
   const neg=items.filter(x=>!isPay(x.desc)&&x.amount<0).length, pos=items.filter(x=>!isPay(x.desc)&&x.amount>0).length;
@@ -218,7 +221,7 @@ function finalize(items){
   const ok=items.filter(x=>x.amount>0&&!isPay(x.desc));
   const ignored=items.length-ok.length;
   const latest=ok.reduce((a,x)=>x.date>a?x.date:a,'');
-  return {rows:ok,ignored,month:latest?latest.slice(0,7):''};
+  return {rows:ok,ignored,month:latest?latest.slice(0,7):'',cards:[...new Set(ok.map(x=>x.card).filter(Boolean))]};
 }
 const MES={jan:1,fev:2,mar:3,abr:4,mai:5,jun:6,jul:7,ago:8,set:9,out:10,nov:11,dez:12};
 function pdfDate(s){
@@ -233,14 +236,15 @@ function pdfDate(s){
 const PDF_RE=/(\d{1,2}\/\d{1,2}(?:\/\d{2,4})?|\d{1,2}\s+(?:de\s+)?(?:jan|fev|mar|abr|mai|jun|jul|ago|set|out|nov|dez)[a-zç]*\.?(?:\s+(?:de\s+)?\d{4})?)\s+(.+?)\s+(?:(\+)\s*|(-)(?=R\$|\d)|-\s+)?(?:R\$\s*)?(-)?(\d{1,3}(?:\.\d{3})*,\d{2})(\s*C(?![A-Za-z]))?(?=\s|$)/gi;
 const SKIP=/limite|vencimento|fechamento|total|saldo|melhor dia|m[ií]nimo/i;
 function parsePdfLines(lines){
-  const items=[];
-  for(const line of lines){PDF_RE.lastIndex=0;let m;
+  const items=[];let card='';
+  for(const line of lines){PDF_RE.lastIndex=0;let m,hit=false;
     while((m=PDF_RE.exec(line))){
       const date=pdfDate(m[1]);const desc=m[2].replace(/R\$\s*$/,'').replace(/\s+/g,' ').trim();
       if(!date||!/[A-Za-zÀ-ú]{2,}/.test(desc)||SKIP.test(desc))continue;
       let amount=parseAmount(m[6]);if(m[3]||m[4]||m[5]||m[7])amount=-amount;
-      items.push({date,desc,amount});
+      items.push({date,desc,amount,card});hit=true;
     }
+    if(!hit){const k=cardOf(line);if(k)card=k}
   }
   if(!items.length) throw new Error('Não encontrei compras nesse PDF. Confira se é a fatura do cartão.');
   return finalize(items);
@@ -271,6 +275,7 @@ function defaults(){return{people:[{id:'p1',name:'Fabia',color:COLORS[0]},{id:'p
 function load(){try{const s=JSON.parse(localStorage.getItem(KEY));return s&&s.people?s:null}catch(e){return null}}
 let S=load()||defaults();
 S.people.forEach(p=>{if(p.name==='Gisele')p.name='Giselle'});
+S.cardMap=S.cardMap||{};
 function save(){try{localStorage.setItem(KEY,JSON.stringify(S))}catch(e){toast('Não consegui salvar neste navegador. Faça um backup.')}}
 let view='inicio',filter='sem',sheet=null,importDraft=null,delArm=false;
 
@@ -327,7 +332,7 @@ function viewInicio(){
   return `<main class="screen">
     <div><span class="sub">Cartão compartilhado · fatura de</span>${mnav(true)}</div>
     <div class="hero"><span style="font-size:14px;font-weight:600">Total da fatura</span><span class="big">${brl(T.total)}</span>
-      <div class="bar"><i style="width:${pct}%"></i></div><span style="font-size:13px;font-weight:600">${done} de ${list.length} compras já têm dono</span></div>
+      <div class="bar"><i style="width:${pct}%"></i></div><span style="font-size:13px;font-weight:600">${done} de ${list.length} compras já têm dono${list.filter(t=>assigned(t)&&t.check).length?' · '+list.filter(t=>assigned(t)&&t.check).length+' a conferir':''}</span></div>
     <div class="sect"><h2>Por pessoa</h2><div class="card list">${rows}
       <button class="row" data-a="goSem"><span class="av q">?</span><span class="grow name" style="color:var(--mut)">Sem dono (${T.unCount})</span><span class="val" style="color:var(--mut)">${brl(T.un)}</span></button></div></div>
     <button class="btn dark" data-a="goImport">${I.up} Importar fatura (CSV)</button>
@@ -340,18 +345,19 @@ function txCard(t){
   let bottom;
   if(assigned(t)){
     const ids=Object.keys(t.split),multi=ids.length>1;
-    bottom=ids.map(id=>{const p=person(id);return `<span class="pill" style="background:${p.color}1A;color:${p.color}"><span class="av sm" style="background:${p.color}">${esc(ini(p.name))}</span>${esc(p.name)}${multi?' · '+num2(t.split[id]):''}</span>`}).join('')+(t.type?`<span class="tag">${esc(t.type)}</span>`:'');
+    bottom=ids.map(id=>{const p=person(id);return `<span class="pill" style="background:${p.color}1A;color:${p.color}"><span class="av sm" style="background:${p.color}">${esc(ini(p.name))}</span>${esc(p.name)}${multi?' · '+num2(t.split[id]):''}</span>`}).join('')+(t.type?`<span class="tag">${esc(t.type)}</span>`:'')+(t.check?`<button class="tag" data-a="confirm" data-id="${t.id}" style="border:0;background:#FFF3E3;color:#7A4208;font-weight:800;min-height:44px;gap:6px">${I.check} A conferir · Confirmar</button>`:'');
   } else {
     bottom=S.people.map(p=>`<button class="chip" data-a="quick" data-id="${t.id}" data-p="${p.id}" aria-label="Marcar para ${esc(p.name)}" style="border-color:${p.color}55;background:${p.color}14;color:${p.color}">${esc(ini(p.name))}</button>`).join('')+`<button class="chip add" data-a="open" data-id="${t.id}" aria-label="Mais opções">${I.plus}</button>`;
   }
-  return `<div class="card tx"><button class="txhead" data-a="open" data-id="${t.id}"><span style="display:flex;flex-direction:column;gap:2px;min-width:0"><span class="desc">${esc(t.desc)}</span><span class="sub" style="font-size:13px">${fmtDate(t.date)}</span></span><span class="val">${brl(t.amount)}</span></button><div class="chips">${bottom}</div></div>`;
+  return `<div class="card tx"><button class="txhead" data-a="open" data-id="${t.id}"><span style="display:flex;flex-direction:column;gap:2px;min-width:0"><span class="desc">${esc(t.desc)}</span><span class="sub" style="font-size:13px">${fmtDate(t.date)}${t.card?' · '+esc(t.card):''}</span></span><span class="val">${brl(t.amount)}</span></button><div class="chips">${bottom}</div></div>`;
 }
 function viewCompras(){
   if(!S.current) return `<main class="screen"><h1>Compras</h1><div class="card empty">Importe uma fatura primeiro.</div><button class="btn dark" data-a="goImport">${I.up} Importar fatura (CSV)</button></main>`;
-  const list=sorted(),sem=list.filter(t=>!assigned(t)),show=filter==='sem'?sem:list;
+  const list=sorted(),sem=list.filter(t=>!assigned(t)),conf=list.filter(t=>assigned(t)&&t.check),show=filter==='sem'?sem:filter==='conf'?conf:list;
   return `<main class="screen">
     <div><h1>Compras</h1>${mnav(false)}</div>
-    <div class="seg"><button class="${filter==='sem'?'on':''}" data-a="filt" data-f="sem">Sem dono · ${sem.length}</button><button class="${filter==='todas'?'on':''}" data-a="filt" data-f="todas">Todas · ${list.length}</button></div>
+    <div class="seg"><button class="${filter==='sem'?'on':''}" data-a="filt" data-f="sem">Sem dono · ${sem.length}</button><button class="${filter==='conf'?'on':''}" data-a="filt" data-f="conf">Conferir · ${conf.length}</button><button class="${filter==='todas'?'on':''}" data-a="filt" data-f="todas">Todas · ${list.length}</button></div>
+    ${filter==='conf'&&conf.length?'<button class="btn light" data-a="confirmAll">Confirmar todas ('+conf.length+')</button>':''}
     ${show.length?'<span class="help">Toque numa pessoa para marcar rapidinho, ou na compra para escolher o tipo e dividir.</span>':''}
     <div class="sect">${show.length?show.map(txCard).join(''):`<div class="card empty">Tudo marcado nesta fatura.<br><button class="link" data-a="tab" data-v="resumo">Ver o resumo</button></div>`}</div>
   </main>`;
@@ -371,6 +377,7 @@ function viewResumo(){
   return `<main class="screen">
     <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px"><div><h1>Quem deve quanto</h1>${mnav(false)}</div><button class="icon dark" data-a="share" aria-label="Compartilhar resumo">${I.share}</button></div>
     ${T.unCount?`<button class="warn" data-a="goSem">${I.alert}<span class="grow">${T.unCount} compra${T.unCount>1?'s':''} sem dono · ${brl(T.un)}</span><span style="font-weight:800">Marcar</span></button>`:''}
+    ${(()=>{const n=txs(k).filter(t=>assigned(t)&&t.check).length;return n?`<button class="warn" data-a="goConf">${I.alert}<span class="grow">${n} compra${n>1?'s':''} a conferir</span><span style="font-weight:800">Conferir</span></button>`:''})()}
     ${cards||'<div class="card empty">Marque as compras para ver quanto é de cada pessoa.</div>'}
     <div class="card" style="padding:14px 16px;display:flex;justify-content:space-between"><span style="font-weight:800">Total da fatura</span><span class="val">${brl(T.total)}</span></div>
   </main>`;
@@ -390,6 +397,7 @@ function viewImport(){
       <button class="link" data-a="resetImport">Trocar</button></div>
     <label class="sect"><span style="font-weight:800;font-size:15px">Mês da fatura</span><input type="month" class="inp" data-c="imonth" value="${esc(d.month)}"></label>
     ${exists?`<span class="help">Já existe fatura de ${monthLabel(d.month)}. As compras novas serão somadas, sem repetir as que já estão lá.</span>`:''}
+    ${d.cards&&d.cards.length?`<div class="sect"><span style="font-weight:800;font-size:15px">Cartões encontrados</span><span class="help">Escolha de quem é cada cartão. As compras dele já entram marcadas para essa pessoa, como “a conferir”.</span><div class="card list">${d.cards.map(c=>`<label class="row" style="gap:10px"><span class="grow" style="font-weight:700;font-size:14px;word-break:break-word">${esc(c)}</span><select class="inp" style="flex:none;width:140px;height:42px" data-c="cardmap" data-k="${esc(cardKey(c))}"><option value="">Ninguém</option>${S.people.map(p=>`<option value="${p.id}" ${S.cardMap[cardKey(c)]===p.id?'selected':''}>${esc(p.name)}</option>`).join('')}</select></label>`).join('')}</div></div>`:''}
     <div class="sect"><span style="font-weight:800;font-size:14px">Prévia</span><div class="card prev">${d.rows.slice(0,5).map(r=>`<div class="r"><span style="color:var(--mut);width:46px;flex:none">${fmtDate(r.date).slice(0,5)}</span><span class="grow" style="word-break:break-word">${esc(r.desc)}</span><span style="font-weight:800">${num2(r.amount)}</span></div>`).join('')}</div></div>
     <button class="btn dark" data-a="doImport">Importar ${d.rows.length} compras</button>`;
   }
@@ -468,11 +476,11 @@ function openMark(id,extra){
 }
 function closeSheet(){sheet=null;renderSheet()}
 function goNext(fromId){
-  const list=sorted(),i=list.findIndex(x=>x.id===fromId);
-  const n=list.slice(i+1).find(x=>!assigned(x))||list.slice(0,Math.max(i,0)).find(x=>!assigned(x));
+  const list=sorted(),i=list.findIndex(x=>x.id===fromId),need=x=>!assigned(x)||x.check;
+  const n=list.slice(i+1).find(need)||list.slice(0,Math.max(i,0)).find(need);
   if(n) openMark(n.id); else {closeSheet(); if(!list.some(x=>!assigned(x))) toast('Tudo marcado nesta fatura!')}
 }
-function finishSave(t){setRule(t,sheet.remember);save();render();goNext(t.id)}
+function finishSave(t){t.check=false;setRule(t,sheet.remember);save();render();goNext(t.id)}
 
 // ---------- ações ----------
 function toast(msg){const d=document.createElement('div');d.className='toast';d.textContent=msg;d.setAttribute('role','status');document.body.appendChild(d);setTimeout(()=>d.remove(),2600)}
@@ -509,8 +517,11 @@ function doImport(){
   const have={}; m.txs.forEach(t=>{const k=t.date+'|'+t.desc+'|'+t.amount;have[k]=(have[k]||0)+1});
   const seen={}; let added=0,auto=0,base=m.txs.length;
   d.rows.forEach(r=>{const k=r.date+'|'+r.desc+'|'+r.amount;seen[k]=(seen[k]||0)+1;if(seen[k]<=(have[k]||0)) return;
-    const t={id:uid('t'),i:base+added,date:r.date,desc:r.desc,amount:r.amount,split:null,type:null};
-    if(applyRule(t)) auto++; m.txs.push(t); added++;});
+    const t={id:uid('t'),i:base+added,date:r.date,desc:r.desc,amount:r.amount,split:null,type:null,card:r.card||''};
+    const pid=r.card&&S.cardMap[cardKey(r.card)];
+    if(pid&&S.people.some(p=>p.id===pid)){t.split={[pid]:t.amount};t.check=true;const ru=S.rules[norm(t.desc)];if(ru&&ru.type)t.type=ru.type;auto++}
+    else if(applyRule(t)) auto++;
+    m.txs.push(t); added++;});
   S.current=d.month; importDraft=null; view='compras'; filter='sem'; save(); render();
   toast(added?`${added} compras importadas${auto?` · ${auto} marcadas automaticamente`:''}`:'Nenhuma compra nova nesse arquivo');
 }
@@ -533,7 +544,7 @@ const A={
   filt:el=>{filter=el.dataset.f;render()},
   mprev:()=>{const ks=keys(),i=ks.indexOf(S.current);if(i>0){S.current=ks[i-1];save();render()}},
   mnext:()=>{const ks=keys(),i=ks.indexOf(S.current);if(i<ks.length-1){S.current=ks[i+1];save();render()}},
-  quick:el=>{const t=findTx(el.dataset.id);t.split={[el.dataset.p]:t.amount};save();render();toast('Marcada para '+person(el.dataset.p).name)},
+  quick:el=>{const t=findTx(el.dataset.id);t.split={[el.dataset.p]:t.amount};t.check=false;save();render();toast('Marcada para '+person(el.dataset.p).name)},
   open:el=>openMark(el.dataset.id),
   selP:el=>{sheet.sel=sheet.sel===el.dataset.p?null:el.dataset.p;renderSheet()},
   addP:()=>{sheet.adding=true;renderSheet()},
@@ -559,6 +570,9 @@ const A={
   bank:el=>{S.bank=el.dataset.b;save();render()},
   resetImport:()=>{importDraft=null;render()},
   closeSheet:()=>closeSheet(),
+  confirm:el=>{const t=findTx(el.dataset.id);if(t){t.check=false;save();render()}},
+  confirmAll:()=>{sorted().forEach(t=>{if(assigned(t))t.check=false});save();render();toast('Tudo confirmado')},
+  goConf:()=>{view='compras';filter='conf';render();scrollTo(0,0)},
   unlock:()=>{const el=$('#pdfPass'),p=el?el.value:'';if(!p||!importDraft||!importDraft.file)return;readFile(importDraft.file,p)},
   doImport,backup,share,
   restore:()=>$('#restoreInput').click(),
@@ -576,6 +590,7 @@ document.addEventListener('change',e=>{
   else if(c==='sOn'){sheet.on[el.dataset.p]=el.checked;renderSheet()}
   else if(c==='file') readFile(el.files[0]);
   else if(c==='imonth') importDraft.month=el.value;
+  else if(c==='cardmap'){S.cardMap[el.dataset.k]=el.value;save()}
 });
 document.addEventListener('input',e=>{
   const el=e.target; if(el.dataset&&el.dataset.i==='sv'){sheet.vals[el.dataset.p]=el.value;const s=$('#sstatus');if(s) s.outerHTML=statusHTML()}
