@@ -267,9 +267,10 @@ async function pdfLines(buf,password){
 // PARSER-END
 
 // ---------- estado ----------
-function defaults(){return{people:[{id:'p1',name:'Fabia',color:COLORS[0]},{id:'p2',name:'Gisele',color:COLORS[1]},{id:'p3',name:'Naildes',color:COLORS[2]}],types:['Mercado','Restaurante','Transporte','Farmácia','Casa','Lazer'],rules:{},months:{},current:null,bank:'itau'}}
+function defaults(){return{people:[{id:'p1',name:'Fabia',color:COLORS[0]},{id:'p2',name:'Giselle',color:COLORS[1]},{id:'p3',name:'Naildes',color:COLORS[2]}],types:['Mercado','Restaurante','Transporte','Farmácia','Casa','Lazer'],rules:{},months:{},current:null,bank:'itau'}}
 function load(){try{const s=JSON.parse(localStorage.getItem(KEY));return s&&s.people?s:null}catch(e){return null}}
 let S=load()||defaults();
+S.people.forEach(p=>{if(p.name==='Gisele')p.name='Giselle'});
 function save(){try{localStorage.setItem(KEY,JSON.stringify(S))}catch(e){toast('Não consegui salvar neste navegador. Faça um backup.')}}
 let view='inicio',filter='sem',sheet=null,importDraft=null,delArm=false;
 
@@ -403,7 +404,7 @@ function render(){
 }
 
 // ---------- folhas (marcar / dividir) ----------
-function header(t,extra){return `<div class="handle"></div><div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start"><div style="min-width:0"><div style="font-size:19px;font-weight:800;word-break:break-word">${esc(t.desc)}</div><div class="sub">${fmtDate(t.date)}${extra||''}</div></div><div style="font-size:19px;font-weight:800;white-space:nowrap">${brl(t.amount)}</div></div>`}
+function header(t,extra){return `<div style="position:sticky;top:-12px;z-index:2;background:#fff;margin:-12px -22px 0;padding:10px 14px 0;display:flex;align-items:center;justify-content:center;min-height:54px"><div class="handle"></div><button data-a="closeSheet" aria-label="Fechar" style="position:absolute;right:14px;top:10px;width:44px;height:44px;border-radius:50%;border:0;background:#D93036;color:#fff;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 6px rgba(217,48,54,.35)"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div><div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start"><div style="min-width:0"><div style="font-size:19px;font-weight:800;word-break:break-word">${esc(t.desc)}</div><div class="sub">${fmtDate(t.date)}${extra||''}</div></div><div style="font-size:19px;font-weight:800;white-space:nowrap">${brl(t.amount)}</div></div>`}
 function addPersonUI(){return sheet.adding?`<div class="inline"><input class="inp" id="newP" placeholder="Nome da pessoa" maxlength="20" autocomplete="off" aria-label="Nome da pessoa"><button class="btn dark" style="min-height:46px" data-a="saveP">Adicionar</button></div>`:''}
 function sheetMark(){
   const t=findTx(sheet.id),multi=t.split&&Object.keys(t.split).length>1;
@@ -557,6 +558,7 @@ const A={
     t.split=split;t.type=sheet.type;finishSave(t)},
   bank:el=>{S.bank=el.dataset.b;save();render()},
   resetImport:()=>{importDraft=null;render()},
+  closeSheet:()=>closeSheet(),
   unlock:()=>{const el=$('#pdfPass'),p=el?el.value:'';if(!p||!importDraft||!importDraft.file)return;readFile(importDraft.file,p)},
   doImport,backup,share,
   restore:()=>$('#restoreInput').click(),
